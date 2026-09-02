@@ -83,10 +83,16 @@ def get_waveform_image_bytes(case_id: str, waveform_png_b64: str) -> bytes:
 # ----------------------------
 # 채점 로직 (로컬 키워드 매칭 - API 불필요, 완전 무료)
 # ----------------------------
+def _normalize(s: str) -> str:
+    """띄어쓰기 차이로 오답 처리되지 않도록 공백을 제거하고 소문자로 통일."""
+    return re.sub(r"\s+", "", s.lower())
+
+
 def grade_answer_local(case: dict, user_answer: str) -> list[dict]:
     """
     사용자 답안을 문장 단위로 나눠서, 케이스 DB의 findings(keywords,
-    misinterpret_triggers)와 매칭한다.
+    misinterpret_triggers)와 매칭한다. 띄어쓰기 차이(예: "ST분절" vs "ST 분절")는
+    같은 표현으로 인정한다.
 
     판정 우선순위:
     1) misinterpret_triggers의 trigger_word가 문장에 있으면 -> '오해석'
@@ -99,7 +105,7 @@ def grade_answer_local(case: dict, user_answer: str) -> list[dict]:
     matched = {}  # finding_id -> result dict
 
     for sentence in sentences:
-        lower = sentence.lower()
+        norm_sentence = _normalize(sentence)
         for finding in case["findings"]:
             if finding["id"] in matched:
                 continue  # 이미 다른 문장에서 대응된 소견은 건너뜀 (첫 매칭 우선)
@@ -108,12 +114,12 @@ def grade_answer_local(case: dict, user_answer: str) -> list[dict]:
             reason = None
 
             for trig in finding.get("misinterpret_triggers", []):
-                if trig["trigger_word"].lower() in lower:
+                if _normalize(trig["trigger_word"]) in norm_sentence:
                     verdict = "오해석"
                     reason = trig["why_template"].format(trigger=trig["trigger_word"])
                     break
 
-            if verdict is None and any(k.lower() in lower for k in finding["keywords"]):
+            if verdict is None and any(_normalize(k) in norm_sentence for k in finding["keywords"]):
                 verdict = "정확일치"
 
             if verdict is None:
