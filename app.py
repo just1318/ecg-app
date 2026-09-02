@@ -240,36 +240,66 @@ def grade_answer(case: dict, user_answer: str):
 # ----------------------------
 # 세션 상태
 # ----------------------------
-def pick_random_case(exclude_id=None):
-    """직전 문제와 다른 케이스를 랜덤으로 하나 뽑는다."""
-    pool = [c for c in cases if c["case_id"] != exclude_id] if exclude_id else cases
+def pick_random_case(exclude_id=None, difficulty=None):
+    """직전 문제와 다른 케이스를, 선택된 난이도 안에서 랜덤으로 하나 뽑는다."""
+    pool = cases
+    if difficulty and difficulty != "전체":
+        pool = [c for c in pool if c.get("difficulty") == difficulty]
+    if exclude_id:
+        filtered = [c for c in pool if c["case_id"] != exclude_id]
+        if filtered:  # 해당 난이도에 케이스가 1개뿐이면 그대로 재사용
+            pool = filtered
     return random.choice(pool)["case_id"]
 
 
+DIFFICULTY_OPTIONS = ["전체", "초급", "중급", "상급"]
+
+if "difficulty" not in st.session_state:
+    st.session_state.difficulty = "전체"
 if "submitted" not in st.session_state:
     st.session_state.submitted = False
 if "results" not in st.session_state:
     st.session_state.results = None
 if "case_id" not in st.session_state:
-    st.session_state.case_id = pick_random_case()
+    st.session_state.case_id = pick_random_case(difficulty=st.session_state.difficulty)
 
 # ----------------------------
 # UI 본문
 # ----------------------------
 st.title("🫀 ECG 판독 훈련")
-st.caption(f"랜덤 출제 · 전체 {len(cases)}개 케이스 중 1개")
+
+selected_difficulty = st.radio(
+    "난이도",
+    DIFFICULTY_OPTIONS,
+    index=DIFFICULTY_OPTIONS.index(st.session_state.difficulty),
+    horizontal=True,
+)
+if selected_difficulty != st.session_state.difficulty:
+    st.session_state.difficulty = selected_difficulty
+    st.session_state.case_id = pick_random_case(difficulty=selected_difficulty)
+    st.session_state.submitted = False
+    st.session_state.results = None
+    st.rerun()
+
+difficulty_counts = {d: sum(1 for c in cases if c.get("difficulty") == d) for d in ["초급", "중급", "상급"]}
+st.caption(
+    f"랜덤 출제 · {selected_difficulty} "
+    f"({difficulty_counts.get(selected_difficulty, len(cases)) if selected_difficulty != '전체' else len(cases)}개 케이스 중 1개)"
+)
 
 col_a, col_b = st.columns([3, 1])
 with col_b:
     if st.button("🔀 다른 문제", use_container_width=True):
-        st.session_state.case_id = pick_random_case(exclude_id=st.session_state.case_id)
+        st.session_state.case_id = pick_random_case(
+            exclude_id=st.session_state.case_id, difficulty=st.session_state.difficulty
+        )
         st.session_state.submitted = False
         st.session_state.results = None
         st.rerun()
 
 case = next(c for c in cases if c["case_id"] == st.session_state.case_id)
 with col_a:
-    st.markdown(f"**{case['case_id']}**")
+    st.markdown(f"**{case['case_id']}** · {case.get('difficulty', '-')}")
 
 # 12유도 ECG 파형 (항상 표시 - 이게 판독 대상 자료)
 st.markdown("**12유도 심전도**")
@@ -343,7 +373,9 @@ else:
         st.markdown(html, unsafe_allow_html=True)
 
     if st.button("다음 문제 풀기", use_container_width=True, type="primary"):
-        st.session_state.case_id = pick_random_case(exclude_id=st.session_state.case_id)
+        st.session_state.case_id = pick_random_case(
+            exclude_id=st.session_state.case_id, difficulty=st.session_state.difficulty
+        )
         st.session_state.submitted = False
         st.session_state.results = None
         st.rerun()
