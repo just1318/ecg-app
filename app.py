@@ -1,12 +1,14 @@
 """
-ECG 판독 모의 훈련 앱 - Streamlit 통합 버전 (무료/로컬 채점 버전)
+ECG 판독 모의 훈련 앱 - Streamlit 통합 버전 (무료/로컬 채점 + 사전 렌더링 이미지 버전)
 - 1단계 UI(원문 잠금 -> 제출 후 공개, 인라인 색상 채점)
-- 2단계 DB(ecg_cases_db_100.json)
+- 2단계 DB(ecg_cases_db_100.json) - 12유도 파형 PNG가 base64로 이미 포함되어 있음
 - 3단계 채점: API 없이 케이스 DB에 저장된 keywords/misinterpret_triggers로
   로컬에서 텍스트 매칭 채점 (완전 무료, 인터넷 연결 불필요)
 
-  ※ 나중에 API 키가 생기면 grade_answer_llm() 함수로 교체해서
-     의미 기반(semantic) 채점으로 업그레이드할 수 있습니다.
+  ※ 파형 이미지를 매 요청마다 실시간으로 그리지 않고, 미리 만들어둔 PNG를
+     base64로 디코드만 하기 때문에 Render 무료 플랜(약한 CPU)에서도 빠릅니다.
+     새 케이스를 추가하고 싶으면 ecg_waveform_gen.py로 다시 생성해서
+     waveform_png_b64 필드를 채워 넣으면 됩니다.
 
 실행 전 준비:
   pip install -r requirements.txt
@@ -16,12 +18,10 @@ ECG 판독 모의 훈련 앱 - Streamlit 통합 버전 (무료/로컬 채점 버
 import json
 import re
 import random
-import tempfile
+import base64
 from pathlib import Path
 
 import streamlit as st
-
-from ecg_waveform_gen import render_12_lead_png
 
 # ----------------------------
 # 기본 설정
@@ -76,11 +76,9 @@ cases = load_cases()
 
 
 @st.cache_data(show_spinner=False)
-def get_waveform_image_bytes(case_id: str, waveform_params: dict) -> bytes:
-    """케이스별 12유도 파형 PNG를 생성해서 캐시. 실행 중 매번 재생성하지 않도록 함."""
-    tmp_path = Path(tempfile.gettempdir()) / f"ecg_wave_{case_id}.png"
-    render_12_lead_png(waveform_params, str(tmp_path), title="")
-    return tmp_path.read_bytes()
+def get_waveform_image_bytes(case_id: str, waveform_png_b64: str) -> bytes:
+    """미리 렌더링된 base64 PNG를 디코드만 함 (실시간 생성 없음 -> 빠름)."""
+    return base64.b64decode(waveform_png_b64)
 
 # ----------------------------
 # 채점 로직 (로컬 키워드 매칭 - API 불필요, 완전 무료)
@@ -180,7 +178,7 @@ with col_a:
 
 # 12유도 ECG 파형 (항상 표시 - 이게 판독 대상 자료)
 st.markdown("**12유도 심전도**")
-img_bytes = get_waveform_image_bytes(case["case_id"], case["waveform_params"])
+img_bytes = get_waveform_image_bytes(case["case_id"], case["waveform_png_b64"])
 st.image(img_bytes, use_container_width=True)
 st.caption("※ 실제 환자 파형이 아닌, 소견 학습용 합성(스케치) 파형입니다.")
 
