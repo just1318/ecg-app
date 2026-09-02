@@ -1,17 +1,13 @@
 """
-ECG 판독 모의 훈련 앱 - Streamlit 통합 버전 (무료/로컬 채점 + 사전 렌더링 이미지 버전)
+ECG 판독 모의 훈련 앱 - Streamlit 통합 버전 (Gemini API 채점 버전)
 - 1단계 UI(원문 잠금 -> 제출 후 공개, 인라인 색상 채점)
 - 2단계 DB(ecg_cases_db_100.json) - 12유도 파형 PNG가 base64로 이미 포함되어 있음
-- 3단계 채점: API 없이 케이스 DB에 저장된 keywords/misinterpret_triggers로
-  로컬에서 텍스트 매칭 채점 (완전 무료, 인터넷 연결 불필요)
-
-  ※ 파형 이미지를 매 요청마다 실시간으로 그리지 않고, 미리 만들어둔 PNG를
-     base64로 디코드만 하기 때문에 Render 무료 플랜(약한 CPU)에서도 빠릅니다.
-     새 케이스를 추가하고 싶으면 ecg_waveform_gen.py로 다시 생성해서
-     waveform_png_b64 필드를 채워 넣으면 됩니다.
+- 3단계 채점: GEMINI_API_KEY 환경변수가 있으면 Gemini API로 의미 기반 채점,
+  없으면 자동으로 로컬 키워드 매칭(완전 무료)으로 대체(fallback)
 
 실행 전 준비:
   pip install -r requirements.txt
+  (선택) Render 환경변수에 GEMINI_API_KEY 등록 -> 의미 기반 채점 활성화
   streamlit run app.py
 """
 
@@ -19,6 +15,7 @@ import json
 import re
 import random
 import base64
+import os
 from pathlib import Path
 
 import streamlit as st
@@ -29,6 +26,40 @@ import streamlit as st
 st.set_page_config(page_title="ECG 판독 훈련", page_icon="🫀", layout="centered")
 
 DB_PATH = Path(__file__).parent / "ecg_cases_db_100.json"
+
+GEMINI_SYSTEM_PROMPT = """당신은 임상병리사 국가시험 수준의 심전도(ECG) 판독 채점관입니다.
+아래 [정답지]와 [사용자 답안]을 비교하여, 정답지의 각 소견(finding)에 대해
+사용자 답안이 어떻게 대응하는지 판정하세요.
+
+각 소견(finding)마다 다음 중 하나로 판정합니다:
+
+1. "정확일치" — 사용자가 해당 소견을 정답지와 의미적으로 동일하게 서술함
+   (완전히 같은 단어일 필요는 없음. 예: "동리듬"과 "정상 동리듬 소견"은 동일 인정,
+    "ST 분절 상승"과 "ST분절 상승"처럼 띄어쓰기 차이도 동일 인정)
+
+2. "누락" — 사용자 답안에 해당 소견에 대한 언급이 전혀 없음
+
+3. "오해석" — 사용자가 해당 소견 "자리"를 언급했지만 다음 중 하나로 잘못 서술함:
+   (a) 다른 소견명/부위/유형으로 혼동 (예: 좌각차단 -> 우각차단)
+   (b) 정상/비정상 판단을 반대로 함 (예: 정상 소견을 "이상 있음"으로 서술)
+   이 경우 반드시 "왜 오해석인지"를 원문 대비 1문장으로 설명하세요.
+
+각 소견마다 어느 사용자 문장이 대응되는지도 함께 표시하세요.
+
+다음 JSON 형식으로만 출력하세요. 다른 텍스트, 코드블록 표시(```) 등은 절대 포함하지 마세요:
+
+{
+  "results": [
+    {
+      "finding_id": "F1",
+      "finding_name": "정상 동리듬",
+      "verdict": "정확일치" | "누락" | "오해석",
+      "matched_sentence": "사용자 답안 중 대응 문장 (없으면 null)",
+      "reason": "오해석일 경우에만: 원문 대비 왜 틀렸는지 1문장 설명 (그 외에는 null)"
+    }
+  ]
+}
+"""
 
 # ----------------------------
 # 스타일 (1단계 프로토타입 색상 규칙 그대로 이식)
@@ -149,6 +180,64 @@ def grade_answer_local(case: dict, user_answer: str) -> list[dict]:
 
 
 # ----------------------------
+# 채점 로직 (Gemini API - 의미 기반, 키 있을 때만)
+# ----------------------------
+def grade_answer_gemini(case: dict, user_answer: str) -> list[dict]:
+    """GEMINI_API_KEY가 있을 때 의미 기반으로 채점. 실패하면 예외를 던짐(호출부에서 fallback 처리)."""
+    import urllib.request
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    findings_for_prompt = [
+        {"id": f["id"], "name_kr": f["name_kr"], "original_phrase": f["original_phrase"]}
+        for f in case["findings"]
+    ]
+    user_message = (
+        f"[정답지]\n{json.dumps(findings_for_prompt, ensure_ascii=False, indent=2)}\n\n"
+        f'[사용자 답안]\n"""\n{user_answer}\n"""'
+    )
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash:generateContent?key={api_key}"
+    )
+    payload = {
+        "system_instruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+        "generationConfig": {"response_mime_type": "application/json"},
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+    cleaned = raw_text.replace("```json", "").replace("```", "").strip()
+    parsed = json.loads(cleaned)
+    return parsed["results"]
+
+
+def grade_answer(case: dict, user_answer: str):
+    """
+    GEMINI_API_KEY가 설정되어 있으면 의미 기반(Gemini) 채점을 시도하고,
+    키가 없거나 호출이 실패하면 자동으로 로컬 키워드 매칭 채점으로 대체한다.
+    반환값: (결과 리스트, 실제 사용된 채점 방식 "gemini" | "local")
+    """
+    if os.environ.get("GEMINI_API_KEY"):
+        try:
+            return grade_answer_gemini(case, user_answer), "gemini"
+        except Exception:
+            pass  # 조용히 로컬 채점으로 대체
+    return grade_answer_local(case, user_answer), "local"
+
+
+# ----------------------------
 # 세션 상태
 # ----------------------------
 def pick_random_case(exclude_id=None):
@@ -221,8 +310,9 @@ if not st.session_state.submitted:
         if not user_answer.strip():
             st.warning("답안을 입력해주세요.")
         else:
-            results = grade_answer_local(case, user_answer)
+            results, method = grade_answer(case, user_answer)
             st.session_state.results = results
+            st.session_state.grading_method = method
             st.session_state.submitted = True
             st.session_state.last_answer = user_answer
             st.rerun()
@@ -233,6 +323,8 @@ else:
     st.markdown(f"> {st.session_state.last_answer}")
 
     st.markdown("### 채점 결과")
+    method_label = "🧠 Gemini 의미 기반 채점" if st.session_state.get("grading_method") == "gemini" else "🔤 로컬 키워드 매칭 채점"
+    st.caption(method_label)
     st.markdown(
         "🟢 정확 일치&nbsp;&nbsp;&nbsp;🟣 오해석&nbsp;&nbsp;&nbsp;🔴 누락",
         unsafe_allow_html=True,
